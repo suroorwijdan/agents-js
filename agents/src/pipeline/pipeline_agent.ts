@@ -277,6 +277,8 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
   #transcriptionId?: string;
   #agentTranscribedText = '';
   #agentFinalTranscriptionBuffer: TranscriptionSegment[] = [];
+  /** Set to track user speeches that have already been committed to prevent duplicate USER_SPEECH_COMMITTED events */
+  #committedUserSpeeches = new Set<string>();
 
   constructor(
     /** Voice Activity Detection instance. */
@@ -550,6 +552,10 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
       this.#lastFinalTranscriptTime = Date.now();
       this.transcribedText += (this.transcribedText ? ' ' : '') + newTranscript;
 
+      // Clear old committed speeches when new transcription comes in
+      // This prevents the Set from growing indefinitely
+      this.#committedUserSpeeches.clear();
+
       await this.#publishTranscription(
         this.#humanInput!.participant.identity,
         this.#humanInput!.subscribedTrack!.sid!,
@@ -713,6 +719,13 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
 
     const commitUserQuestionIfNeeded = () => {
       if (!userQuestion || synthesisHandle.interrupted || handle.userCommitted) return;
+      
+      // Check if this exact user speech has already been committed globally
+      if (this.#committedUserSpeeches.has(userQuestion)) {
+        handle.markUserCommitted();
+        return;
+      }
+      
       const isUsingTools =
         handle.source instanceof LLMStream && !!handle.source.functionCalls.length;
 
@@ -727,6 +740,9 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
       ) {
         return;
       }
+
+      // Mark this user speech as committed globally to prevent duplicates
+      this.#committedUserSpeeches.add(userQuestion);
 
       this.#logger.child({ userTranscript: userQuestion }).debug('committed user transcript');
       const userMsg = ChatMessage.create({ text: userQuestion, role: ChatRole.USER });
@@ -1061,6 +1077,8 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
     }
 
     this.#room?.removeAllListeners(RoomEvent.ParticipantConnected);
+    // Clear committed user speeches set to prevent memory leaks
+    this.#committedUserSpeeches.clear();
     // TODO(nbsp): await this.#deferredValidation.close()
   }
 }
