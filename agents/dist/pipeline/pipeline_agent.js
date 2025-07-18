@@ -134,6 +134,8 @@ class VoicePipelineAgent extends EventEmitter {
   #transcriptionId;
   #agentTranscribedText = "";
   #agentFinalTranscriptionBuffer = [];
+  /** Set to track user speeches that have already been committed to prevent duplicate USER_SPEECH_COMMITTED events */
+  #committedUserSpeeches = /* @__PURE__ */ new Set();
   constructor(vad, stt, llm, tts, opts = defaultVPAOptions) {
     super();
     this.#opts = { ...defaultVPAOptions, ...opts };
@@ -339,6 +341,7 @@ class VoicePipelineAgent extends EventEmitter {
       }
       this.#lastFinalTranscriptTime = Date.now();
       this.transcribedText += (this.transcribedText ? " " : "") + newTranscript;
+      this.#committedUserSpeeches.clear();
       await this.#publishTranscription(
         this.#humanInput.participant.identity,
         this.#humanInput.subscribedTrack.sid,
@@ -466,10 +469,15 @@ class VoicePipelineAgent extends EventEmitter {
     const joinFut = playHandle.join();
     const commitUserQuestionIfNeeded = () => {
       if (!userQuestion || synthesisHandle.interrupted || handle.userCommitted) return;
+      if (this.#committedUserSpeeches.has(userQuestion)) {
+        handle.markUserCommitted();
+        return;
+      }
       const isUsingTools2 = handle.source instanceof LLMStream && !!handle.source.functionCalls.length;
       if (handle.allowInterruptions && !isUsingTools2 && playHandle.timePlayed < this.MIN_TIME_PLAYED_FOR_COMMIT && !joinFut.done) {
         return;
       }
+      this.#committedUserSpeeches.add(userQuestion);
       this.#logger.child({ userTranscript: userQuestion }).debug("committed user transcript");
       const userMsg = ChatMessage.create({ text: userQuestion, role: ChatRole.USER });
       this.chatCtx.messages.push(userMsg);
@@ -722,6 +730,7 @@ class VoicePipelineAgent extends EventEmitter {
       return;
     }
     (_a = this.#room) == null ? void 0 : _a.removeAllListeners(RoomEvent.ParticipantConnected);
+    this.#committedUserSpeeches.clear();
   }
 }
 async function* llmStreamToStringIterable(speechId, stream) {
