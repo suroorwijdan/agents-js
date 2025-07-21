@@ -279,6 +279,8 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
   #agentFinalTranscriptionBuffer: TranscriptionSegment[] = [];
   /** Set to track user speeches that have already been committed to prevent duplicate USER_SPEECH_COMMITTED events */
   #committedUserSpeeches = new Set<string>();
+  /** Set to track user questions that have already had agent replies synthesized to prevent duplicate responses */
+  #synthesizedAgentReplies = new Set<string>();
 
   constructor(
     /** Voice Activity Detection instance. */
@@ -550,11 +552,12 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
       }
 
       this.#lastFinalTranscriptTime = Date.now();
-      this.transcribedText += (this.transcribedText ? ' ' : '') + newTranscript;
+      this.transcribedText += (this.transcribedText ? ' ' : '') + newTranscript.trim();
 
-      // Clear old committed speeches when new transcription comes in
-      // This prevents the Set from growing indefinitely
+      // Clear old committed speeches and synthesized replies when new transcription comes in
+      // This prevents the Sets from growing indefinitely
       this.#committedUserSpeeches.clear();
+      this.#synthesizedAgentReplies.clear();
 
       await this.#publishTranscription(
         this.#humanInput!.participant.identity,
@@ -621,9 +624,22 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
   }
 
   #synthesizeAgentReply() {
+    // Check if we've already synthesized a reply for this user input
+    if (this.transcribedText && this.#synthesizedAgentReplies.has(this.transcribedText)) {
+      this.#logger
+        .child({ userTranscript: this.transcribedText })
+        .debug('skipping agent reply synthesis - already synthesized for this user input');
+      return;
+    }
+
     this.#pendingAgentReply?.cancel();
     if (this.#humanInput && this.#humanInput.speaking) {
       this.#updateState('thinking', 200);
+    }
+
+    // Mark this user input as having a reply synthesized
+    if (this.transcribedText) {
+      this.#synthesizedAgentReplies.add(this.transcribedText);
     }
 
     this.#pendingAgentReply = SpeechHandle.createAssistantReply(
@@ -749,7 +765,7 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
       this.chatCtx.messages.push(userMsg);
       this.emit(VPAEvent.USER_SPEECH_COMMITTED, userMsg);
 
-      this.transcribedText = this.transcribedText.slice(userQuestion.length);
+      this.transcribedText = this.transcribedText.slice(userQuestion.length).trim();
       handle.markUserCommitted();
     };
 
@@ -1006,17 +1022,25 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
       this.#synthesizeAgentReply();
     }
 
+    // If still no pending reply after synthesis attempt, it means synthesis was skipped
+    // due to deduplication (already synthesized for this user input)
     if (!this.#pendingAgentReply) {
-      throw new Error('pending agent reply is undefined');
+      this.#logger
+        .child({ userTranscript: this.transcribedText })
+        .debug('skipping validation - no pending reply (likely already synthesized for this input)');
+      return;
     }
 
-    // in some bad timimg, we could end up with two pushed agent replies inside the speech queue.
-    // so make sure we directly interrupt every reply when validating a new one
+    // Cancel any pending agent reply that hasn't started playing yet to avoid multiple replies
+    // Only interrupt replies that haven't been committed yet
     if (this.#speechQueueOpen.done) {
       for await (const speech of this.#speechQueue) {
         if (speech === VoicePipelineAgent.FLUSH_SENTINEL) break;
         if (!speech.isReply) continue;
-        if (speech.allowInterruptions) speech.interrupt();
+        // Only interrupt replies that haven't been committed and are not currently playing
+        if (speech.allowInterruptions && !speech.speechCommitted && speech !== this.#playingSpeech) {
+          speech.interrupt();
+        }
       }
     }
 
@@ -1077,8 +1101,9 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
     }
 
     this.#room?.removeAllListeners(RoomEvent.ParticipantConnected);
-    // Clear committed user speeches set to prevent memory leaks
+    // Clear tracking sets to prevent memory leaks
     this.#committedUserSpeeches.clear();
+    this.#synthesizedAgentReplies.clear();
     // TODO(nbsp): await this.#deferredValidation.close()
   }
 }

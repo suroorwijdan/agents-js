@@ -136,6 +136,8 @@ class VoicePipelineAgent extends EventEmitter {
   #agentFinalTranscriptionBuffer = [];
   /** Set to track user speeches that have already been committed to prevent duplicate USER_SPEECH_COMMITTED events */
   #committedUserSpeeches = /* @__PURE__ */ new Set();
+  /** Set to track user questions that have already had agent replies synthesized to prevent duplicate responses */
+  #synthesizedAgentReplies = /* @__PURE__ */ new Set();
   constructor(vad, stt, llm, tts, opts = defaultVPAOptions) {
     super();
     this.#opts = { ...defaultVPAOptions, ...opts };
@@ -340,8 +342,9 @@ class VoicePipelineAgent extends EventEmitter {
         this.#transcriptionId = randomUUID();
       }
       this.#lastFinalTranscriptTime = Date.now();
-      this.transcribedText += (this.transcribedText ? " " : "") + newTranscript;
+      this.transcribedText += (this.transcribedText ? " " : "") + newTranscript.trim();
       this.#committedUserSpeeches.clear();
+      this.#synthesizedAgentReplies.clear();
       await this.#publishTranscription(
         this.#humanInput.participant.identity,
         this.#humanInput.subscribedTrack.sid,
@@ -393,9 +396,16 @@ class VoicePipelineAgent extends EventEmitter {
   }
   #synthesizeAgentReply() {
     var _a;
+    if (this.transcribedText && this.#synthesizedAgentReplies.has(this.transcribedText)) {
+      this.#logger.child({ userTranscript: this.transcribedText }).debug("skipping agent reply synthesis - already synthesized for this user input");
+      return;
+    }
     (_a = this.#pendingAgentReply) == null ? void 0 : _a.cancel();
     if (this.#humanInput && this.#humanInput.speaking) {
       this.#updateState("thinking", 200);
+    }
+    if (this.transcribedText) {
+      this.#synthesizedAgentReplies.add(this.transcribedText);
     }
     this.#pendingAgentReply = SpeechHandle.createAssistantReply(
       this.#opts.allowInterruptions,
@@ -482,7 +492,7 @@ class VoicePipelineAgent extends EventEmitter {
       const userMsg = ChatMessage.create({ text: userQuestion, role: ChatRole.USER });
       this.chatCtx.messages.push(userMsg);
       this.emit(4 /* USER_SPEECH_COMMITTED */, userMsg);
-      this.transcribedText = this.transcribedText.slice(userQuestion.length);
+      this.transcribedText = this.transcribedText.slice(userQuestion.length).trim();
       handle.markUserCommitted();
     };
     commitUserQuestionIfNeeded();
@@ -676,13 +686,16 @@ class VoicePipelineAgent extends EventEmitter {
       this.#synthesizeAgentReply();
     }
     if (!this.#pendingAgentReply) {
-      throw new Error("pending agent reply is undefined");
+      this.#logger.child({ userTranscript: this.transcribedText }).debug("skipping validation - no pending reply (likely already synthesized for this input)");
+      return;
     }
     if (this.#speechQueueOpen.done) {
       for await (const speech of this.#speechQueue) {
         if (speech === VoicePipelineAgent.FLUSH_SENTINEL) break;
         if (!speech.isReply) continue;
-        if (speech.allowInterruptions) speech.interrupt();
+        if (speech.allowInterruptions && !speech.speechCommitted && speech !== this.#playingSpeech) {
+          speech.interrupt();
+        }
       }
     }
     this.#logger.child({ speechId: this.#pendingAgentReply.id }).debug("validated agent reply");
@@ -731,6 +744,7 @@ class VoicePipelineAgent extends EventEmitter {
     }
     (_a = this.#room) == null ? void 0 : _a.removeAllListeners(RoomEvent.ParticipantConnected);
     this.#committedUserSpeeches.clear();
+    this.#synthesizedAgentReplies.clear();
   }
 }
 async function* llmStreamToStringIterable(speechId, stream) {
