@@ -210,6 +210,10 @@ const streamSynthesisTask = (
     if (!fullText || fullText.trim().length === 0) {
       cancelled = true;
       handle.queue.put(SynthesisHandle.FLUSH_SENTINEL);
+
+      setTimeout(() => {
+        handle?.playHandle?.interrupt();
+      }, 500);
     }
     ttsStream.flush();
     ttsStream.endInput();
