@@ -211,9 +211,9 @@ const streamSynthesisTask = (
       cancelled = true;
       handle.queue.put(SynthesisHandle.FLUSH_SENTINEL);
 
-      setTimeout(() => {
-        handle?.playHandle?.interrupt();
-      }, 500);
+      // setTimeout(() => {
+      //   handle?.playHandle?.interrupt();
+      // }, 500);
     }
     ttsStream.flush();
     ttsStream.endInput();

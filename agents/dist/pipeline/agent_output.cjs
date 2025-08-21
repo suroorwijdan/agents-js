@@ -183,10 +183,6 @@ const streamSynthesisTask = (stream, handle) => {
     if (!fullText || fullText.trim().length === 0) {
       cancelled = true;
       handle.queue.put(SynthesisHandle.FLUSH_SENTINEL);
-      setTimeout(() => {
-        var _a;
-        (_a = handle == null ? void 0 : handle.playHandle) == null ? void 0 : _a.interrupt();
-      }, 500);
     }
     ttsStream.flush();
     ttsStream.endInput();
